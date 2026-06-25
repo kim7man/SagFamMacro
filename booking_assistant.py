@@ -1040,10 +1040,16 @@ def _click_final_pay(driver):
         if best is not None:
             try:
                 txt = (best.get_attribute("value") or "") + " " + (best.text or "")
+                label = ' '.join(txt.split())[:30]
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'})", best)
                 monitor._click(driver, best)
-                print(f"    💳 최종 결제 버튼 클릭: '{' '.join(txt.split())[:30]}'")
+                print(f"    💳 최종 결제 버튼 클릭: '{label}'")
                 clicked["done"] = True
+                # [텔레그램 2] 최종 결제 버튼 클릭과 동시에 발송
+                try:
+                    notifier.notify_payment_done(detail=f"최종 결제 버튼 클릭: {label} (3DS 필요 시 직접 인증)")
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -1201,8 +1207,7 @@ def run_booking(arg=None):
         status = _do_booking(driver, y, m, d)
         print(f"\n결과: {status} (소요 {time.time()-t0:.1f}초)")
         if status in ("PAID", "AT_PAYMENT"):
-            if status == "PAID":
-                notifier.notify_payment_done(f"{y}-{m}-{d}", "카드 자동 제출 완료 (3DS 필요 시 직접 인증)")
+            # 결제완료 텔레그램은 결제버튼 클릭 시점(_click_final_pay)에서 발송됨
             _wait_human_then_quit(driver)
         else:
             print("   3석 미확보/오류로 결제까지 진행하지 않았습니다.")
@@ -1271,9 +1276,7 @@ def monitor_and_book():
 
             if status in ("PAID", "AT_PAYMENT"):
                 print(f"\n✅ {ds}: {need}석 확보 → 결제 단계 도달({status}). 모니터링 종료.")
-                if status == "PAID":
-                    # [텔레그램 2] 결제 완료 후
-                    notifier.notify_payment_done(ds, "카드 자동 제출 완료 (3DS 필요 시 직접 인증)")
+                # 결제완료 텔레그램은 결제버튼 클릭 시점(_click_final_pay)에서 발송됨
                 _wait_human_then_quit(driver)
                 return
             # 미확보/실패 → 닫고 잠시 이 날짜는 보류 후 계속 모니터링
