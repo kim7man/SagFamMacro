@@ -2,6 +2,28 @@
 # 설정 파일 - 여기만 수정하면 됩니다
 # ============================================================
 
+import os
+
+# .env(민감정보)를 환경변수로 로드. python-dotenv가 없으면 간단 파서로 폴백.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+except Exception:
+    _envpath = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(_envpath):
+        with open(_envpath, encoding="utf-8") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if not _line or _line.startswith("#") or "=" not in _line:
+                    continue
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
+
+def _env(key, default=""):
+    """환경변수 우선, 없으면 기본값. 카드정보 등 민감값은 .env로 빼는 걸 권장."""
+    return os.environ.get(key, default)
+
 # 모니터링 대상 URL (7/1처럼 클릭 가능한 날짜를 선택한 상태의 페이지)
 TARGET_URL = "https://tickets.sagradafamilia.org/en/1-individual/4375-sagrada-familia"
 
@@ -76,6 +98,29 @@ BOOKING_CONTACT = {
 # Pay를 누르면 '은행 결제 페이지'로 이동 → 카드입력/3DS 인증은 사람이 직접.
 # (마케팅 수신 동의 등 선택 항목은 체크하지 않음)
 BOOKING_CLICK_PAY = True
+
+# ------------------------------------------------------------
+# [결제] 은행 결제 페이지에서 카드 정보 자동 입력 + 최종 결제 클릭.
+#   🔒 카드 정보는 .env 파일에서 읽습니다 (CARD_NUMBER 등). .env는 .gitignore
+#      대상이라 커밋되지 않습니다. 이 파일(config.py)에는 평문 카드번호를 두지 마세요.
+#   ⚠️ 결제 게이트웨이(보통 Redsys) DOM은 사이트마다 달라, 칸 자동탐지가
+#      실패할 수 있습니다. 처음엔 화면을 보며 동작을 꼭 확인하세요.
+#   ⚠️ 3DS(은행 OTP/앱 인증)는 자동화 불가 — 결제 클릭 후 사람이 마무리.
+BOOKING_CARD = {
+    "number":    _env("CARD_NUMBER"),       # .env에서 로드 (없으면 빈 값 → 카드입력 건너뜀)
+    "exp_month": _env("CARD_EXP_MONTH"),    # MM
+    "exp_year":  _env("CARD_EXP_YEAR"),     # YY 또는 YYYY (둘 다 처리)
+    "cvv":       _env("CARD_CVV"),
+    "name":      _env("CARD_HOLDER"),
+}
+
+# 카드 정보를 자동 입력할지. False면 결제 페이지에서 멈춤(사람이 입력).
+BOOKING_AUTO_CARD = True
+
+# 카드 입력 후 '최종 결제' 버튼까지 자동 클릭할지.
+#   True  = 카드입력 + 결제버튼 클릭 (실제 결제 시도, 3DS는 사람이)
+#   False = 카드만 채우고 결제버튼은 사람이 직접 클릭 (안전, 처음 테스트 권장)
+BOOKING_CLICK_FINAL_PAY = True
 
 # [중요] Pay 단계 reCAPTCHA 통과용 — 실제 크롬 프로필로 실행.
 # 깨끗한 자동화 크롬은 reCAPTCHA 점수가 낮아 Pay에서 'retry' 에러로 막힘.
