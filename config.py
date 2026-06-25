@@ -87,11 +87,11 @@ BOOKING_SUBMIT_TO_PAYMENT = True
 # 결제 페이지(summaryPurchase)의 구매자 연락처 정보 자동 입력.
 # country는 사이트 옵션명과 부분일치로 자동 매칭(예: "Korea" → "Korea, Republic of").
 BOOKING_CONTACT = {
-    "first_name": "Taekyung",
-    "last_name": "Kim",
+    "first_name": "Yanghyun",
+    "last_name": "Cho",
     "country": "South Korea",
-    "phone": "+821027224030",
-    "email": "kim7man@gmail.com",
+    "phone": "+821087251230",
+    "email": "chomeechomee@gmail.com",
 }
 
 # 결제 페이지에서 필수 약관(이용약관/개인정보) 체크 후 Pay 버튼까지 클릭할지.
