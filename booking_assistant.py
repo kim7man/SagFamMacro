@@ -5,8 +5,14 @@
   1. 해당 날짜 선택
   2. 비어있는 시간 선택
   3. 인원 수 선택 (config.TICKET_QUANTITIES)
+     ★ 필요 좌석(예: General 2 + Children 1 = 3석)을 '모두' 확보한 경우에만
+       다음 단계(개인정보→결제)로 진행한다. 미확보면 예약을 중단한다.
   4. 개인정보 입력 (config.BOOKING_PASSENGERS: 이름/성/여권/국가/번호)
   5. CONTINUE 클릭 (결제 페이지까지) — 이후 reCAPTCHA/결제는 사람이 마무리
+
+통합 모니터링: `monitor` 인자로 실행하면 TARGET_DATES를 폴링하다 가용이 뜨면
+자동으로 위 예약을 시도하고, 좌석을 모두 확보한 경우에만 결제까지 진행 후 멈춘다.
+좌석 미확보면 창을 닫고 계속 모니터링한다.
 
 탐색으로 확인된 사이트 동작:
   - 쿠키 'Accept all'은 JS 클릭 필요 (수락해야 가용 데이터 로드)
@@ -17,8 +23,9 @@
     Country=3879(Pasaporte 선택 시 등장), PassportNo=3887(Country 선택 시 등장)
 
 실행:
-  python booking_assistant.py 2026-7-5     # 특정 날짜
-  python booking_assistant.py              # config.TARGET_DATES 중 첫 가용 날짜 자동
+  python booking_assistant.py 2026-7-5     # 특정 날짜 1회 예약
+  python booking_assistant.py              # config.TARGET_DATES 중 첫 가용 날짜 1회
+  python booking_assistant.py monitor      # 모니터링+예약 통합 (3석 확보 시에만 결제까지)
 """
 
 import sys
@@ -248,30 +255,46 @@ def pick_first_time(driver):
 
 
 # ----------------------------------------------------------------- 인원
+def required_seats():
+    """config.TICKET_QUANTITIES가 요구하는 총 좌석 수."""
+    return sum(q for _, q in config.TICKET_QUANTITIES)
+
+
 def set_quantities(driver):
+    """config.TICKET_QUANTITIES대로 인원 설정.
+    모든 타입이 목표 수량에 '전부' 도달하면 True(=좌석 모두 확보), 아니면 False.
+    (증가 버튼을 눌러도 값이 안 오르면 그 타입의 상한에 도달한 것으로 판단)"""
     WebDriverWait(driver, 15).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, "div.buyerType")))
+    secured_all = True
     for label_contains, qty in config.TICKET_QUANTITIES:
-        ok = False
+        achieved, found = 0, False
         for bt in driver.find_elements(By.CSS_SELECTOR, "div.buyerType"):
             try:
                 lbl = bt.find_element(By.CSS_SELECTOR, "label").text.strip()
             except NoSuchElementException:
                 continue
             if label_contains.lower() in lbl.lower():
+                found = True
                 inp = bt.find_element(By.CSS_SELECTOR, "input[name='quantity']")
                 inc = bt.find_element(By.CSS_SELECTOR, "button[data-action-id='increment']")
-                # 값이 목표에 도달하는지 확인하며 빠르게 클릭 (고정 sleep 없이)
-                for _ in range(qty * 3):  # 안전 상한
-                    if int(inp.get_attribute("value") or "0") >= qty:
+                # 목표 도달까지 클릭. 값이 더 안 오르면(상한) 중단.
+                for _ in range(qty * 4):  # 안전 상한
+                    achieved = int(inp.get_attribute("value") or "0")
+                    if achieved >= qty:
                         break
                     monitor._click(driver, inc)
                     time.sleep(POLL)
-                print(f"    인원 '{lbl}' = {inp.get_attribute('value')}")
-                ok = True
+                    if int(inp.get_attribute("value") or "0") == achieved:  # 안 오름 = 상한
+                        break
+                achieved = int(inp.get_attribute("value") or "0")
+                print(f"    인원 '{lbl}' = {achieved}/{qty}")
                 break
-        if not ok:
+        if not found:
             print(f"    [경고] 인원 타입 '{label_contains}' 못찾음")
+        if achieved < qty:
+            secured_all = False
+    return secured_all
 
 
 # ----------------------------------------------------------------- CONTINUE
@@ -1088,81 +1111,173 @@ def resolve_target_date(arg):
     return y, m, d
 
 
+def _do_booking(driver, y, m, d):
+    """예약 플로우 수행. **3자리(필요 좌석) 모두 확보됐을 때만** 결제까지 진행.
+    드라이버 생성/종료·대기는 호출자가 담당. 상태 문자열 반환:
+      'PAID'        : 카드까지 자동 제출됨(3DS는 사람)
+      'AT_PAYMENT'  : 결제 단계 도달(약관/Pay/카드 일부는 사람 마무리 필요)
+      'INSUFFICIENT': 좌석을 모두 확보 못 해 결제 진행 안 함(예약 중단)
+      'FAILED'      : 진행 중 막힘(버튼 못 찾음 등)"""
+    driver.get(config.TARGET_URL)
+    monitor.accept_cookies(driver)
+    print("[0/5] 쇼핑카트 확인...")
+    ensure_cart_empty(driver)   # 이전 미완료 예약이 남아 있으면 진행이 막혀서 먼저 비움
+    fast_wait(driver, 25).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, ".CalendarMonth_caption")))
+
+    print("[1/5] 날짜 선택...")
+    navigate_and_pick_date(driver, y, m, d)
+
+    print("[2/5] 시간 선택...")
+    print(f"    선택된 시간: {pick_first_time(driver)}")
+
+    print("[3/5] 인원 설정...")
+    need = required_seats()
+    if not set_quantities(driver):
+        print(f"    ⚠️ {need}석 모두 확보 실패 — 결제 진행 안 함, 예약 중단.")
+        return "INSUFFICIENT"
+    print(f"    ✅ {need}석 모두 확보 — 결제까지 진행.")
+
+    print("[4/5] CONTINUE → 개인정보 단계...")
+    if not click_continue(driver):
+        print("    [주의] CONTINUE(btn-custom-next) 클릭 실패")
+        return "FAILED"
+
+    print("[4/5] 개인정보 입력...")
+    fill_passengers(driver)
+
+    if not config.BOOKING_SUBMIT_TO_PAYMENT:
+        print("[5/5] (설정상 자동 진행 안 함) 개인정보까지 입력 완료.")
+        return "AT_PAYMENT"
+
+    print("[5/5] CONTINUE → 결제 페이지...")
+    if not click_continue(driver):
+        print("    [주의] 최종 CONTINUE 버튼을 못 찾음 — 화면에서 직접 눌러주세요.")
+        return "FAILED"
+    dismiss_upsell(driver)   # 제출 직후 업셀 모달이 뜨면 닫기
+    if not wait_left_personal(driver, timeout=45):
+        print("    제출 처리 중... 몇 초 더 걸릴 수 있으니 화면을 확인하세요.")
+        return "AT_PAYMENT"
+
+    print("    ✅ 결제 페이지 진입 완료.")
+    print("[+] 결제 페이지 연락처 입력...")
+    fill_payment_contact(driver)
+    if not getattr(config, "BOOKING_CLICK_PAY", False):
+        return "AT_PAYMENT"
+
+    print("[+] 필수 약관 체크 + Pay...")
+    moved = accept_terms_and_pay(driver)
+    if moved and getattr(config, "BOOKING_AUTO_CARD", False):
+        print("[+] 카드 정보 입력 + 결제...")
+        if fill_card_and_pay(driver):
+            return "PAID"
+    return "AT_PAYMENT"
+
+
+def _wait_human_then_quit(driver, timeout=600):
+    """결제 단계 도달 후 사람이 마무리하도록 창을 열어두고 대기."""
+    print("   (이 창은 열려 있습니다. reCAPTCHA/결제/3DS를 직접 마무리하세요. 끝나면 Enter)")
+    try:
+        input()
+    except EOFError:
+        time.sleep(timeout)
+    try:
+        driver.quit()
+    except Exception:
+        pass
+
+
 def run_booking(arg=None):
+    """단발 예약(CLI). 날짜 지정 또는 첫 가용 타겟. 3석 확보 시에만 결제까지 진행."""
     y, m, d = resolve_target_date(arg)
     print("=" * 60)
-    print(f"  자동 예약 시작: {y}-{m}-{d}")
+    print(f"  자동 예약 시작: {y}-{m}-{d}  (필요 {required_seats()}석)")
     print("=" * 60)
 
     t0 = time.time()
     driver = create_visible_driver()
     try:
-        driver.get(config.TARGET_URL)
-        monitor.accept_cookies(driver)
-        print("[0/5] 쇼핑카트 확인...")
-        ensure_cart_empty(driver)   # 이전 미완료 예약이 남아 있으면 진행이 막혀서 먼저 비움
-        fast_wait(driver, 25).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".CalendarMonth_caption")))
-
-        print("[1/5] 날짜 선택...")
-        navigate_and_pick_date(driver, y, m, d)
-
-        print("[2/5] 시간 선택...")           # pick_first_time이 button.event 등장을 대기
-        t = pick_first_time(driver)
-        print(f"    선택된 시간: {t}")
-
-        print("[3/5] 인원 설정...")           # set_quantities가 div.buyerType 등장을 대기
-        set_quantities(driver)
-
-        print("[4/5] CONTINUE → 개인정보 단계...")
-        if not click_continue(driver):
-            raise RuntimeError("CONTINUE(btn-custom-next) 클릭 실패")
-
-        print("[4/5] 개인정보 입력...")        # fill_passengers가 폼 등장을 대기
-        fill_passengers(driver)
-
-        if config.BOOKING_SUBMIT_TO_PAYMENT:
-            print("[5/5] CONTINUE → 결제 페이지...")
-            if click_continue(driver):
-                dismiss_upsell(driver)   # 제출 직후 업셀 모달이 뜨면 닫기
-                # 최종 제출은 reCAPTCHA 검증+예약생성으로 수십 초 걸릴 수 있음 → 대기
-                if wait_left_personal(driver, timeout=45):
-                    print("    ✅ 결제 페이지 진입 완료.")
-                    print("[+] 결제 페이지 연락처 입력...")
-                    fill_payment_contact(driver)
-                    if getattr(config, "BOOKING_CLICK_PAY", False):
-                        print("[+] 필수 약관 체크 + Pay...")
-                        moved = accept_terms_and_pay(driver)
-                        # Pay 클릭으로 은행/게이트웨이 페이지로 이동했으면 카드 입력 진행
-                        if moved and getattr(config, "BOOKING_AUTO_CARD", False):
-                            print("[+] 카드 정보 입력 + 결제...")
-                            fill_card_and_pay(driver)
-                else:
-                    print("    제출 처리 중... 몇 초 더 걸릴 수 있으니 화면을 확인하세요.")
-            else:
-                print("    [주의] 최종 CONTINUE 버튼을 못 찾음 — 화면에서 직접 눌러주세요.")
+        status = _do_booking(driver, y, m, d)
+        print(f"\n결과: {status} (소요 {time.time()-t0:.1f}초)")
+        if status in ("PAID", "AT_PAYMENT"):
+            _wait_human_then_quit(driver)
         else:
-            print("[5/5] (설정상 자동 진행 안 함) 개인정보까지 입력 완료.")
-
-        print(f"\n✅ 자동 입력 완료 (소요 {time.time()-t0:.1f}초). 이제 reCAPTCHA/결제를 직접 마무리하세요.")
-        print("   (이 창은 열려 있습니다. 끝나면 콘솔에서 Enter)")
-        try:
-            input()
-        except EOFError:
-            time.sleep(600)
+            print("   3석 미확보/오류로 결제까지 진행하지 않았습니다.")
+            try:
+                driver.quit()
+            except Exception:
+                pass
     except Exception as e:
         print(f"\n⚠️ 예약 자동화 중 오류: {type(e).__name__}: {e}")
-        print("   브라우저 창에서 수동으로 이어서 진행하세요. (끝나면 Enter)")
+        print("   브라우저 창에서 수동으로 이어서 진행하세요.")
+        _wait_human_then_quit(driver, timeout=300)
+
+
+def monitor_and_book():
+    """통합 모니터링+예약: TARGET_DATES를 폴링하다 가용이 뜨면 예약을 시도하고,
+    **필요 좌석(예: 3석)을 모두 확보한 경우에만** 결제까지 자동 진행 후 멈춘다.
+    좌석 미확보(INSUFFICIENT)면 창을 닫고 계속 모니터링한다(날짜별 쿨다운 적용)."""
+    client = api_monitor.ClorianClient()
+    interval = getattr(config, "CHECK_INTERVAL_SECONDS", 1)
+    cooldown = getattr(config, "COOLDOWN_SECONDS", 60)
+    need = required_seats()
+    print("=" * 60)
+    print("  통합 모니터링 + 자동 예약")
+    print(f"  대상 날짜: {config.TARGET_DATES}")
+    print(f"  조건: {need}석 모두 확보 시에만 결제까지 자동 진행")
+    print(f"  확인 주기: {interval}초")
+    print("=" * 60)
+
+    skip_until = {}   # 날짜 -> 이 시각까지 재시도 보류(좌석 미확보 등)
+    count = 0
+    while True:
+        count += 1
         try:
-            input()
-        except EOFError:
-            time.sleep(300)
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+            available, _ = client.check_targets()
+        except Exception as e:
+            print(f"\n⚠️ 모니터링 오류: {type(e).__name__}: {str(e).splitlines()[0]}")
+            time.sleep(cooldown)
+            continue
+
+        now = time.time()
+        candidates = [d for d in (available or []) if now >= skip_until.get(d, 0)]
+        if not candidates:
+            tag = f"가용 {available}" if available else "매진"
+            print(f"[{time.strftime('%H:%M:%S')}] #{count} {tag}        ", end="\r")
+            time.sleep(interval)
+            continue
+
+        print(f"\n🎯 가용 감지: {candidates}")
+        for ds in candidates:
+            y, m, d = map(int, ds.split("-"))
+            print(f"\n--- 예약 시도: {ds} ---")
+            driver = create_visible_driver()
+            try:
+                status = _do_booking(driver, y, m, d)
+            except Exception as e:
+                print(f"⚠️ 예약 시도 오류({ds}): {type(e).__name__}: {e}")
+                status = "FAILED"
+
+            if status in ("PAID", "AT_PAYMENT"):
+                print(f"\n✅ {ds}: {need}석 확보 → 결제 단계 도달({status}). 모니터링 종료.")
+                _wait_human_then_quit(driver)
+                return
+            # 미확보/실패 → 닫고 잠시 이 날짜는 보류 후 계속 모니터링
+            print(f"    {ds}: {status} — 창 닫고 계속 모니터링 (이 날짜 {cooldown}초 보류)")
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            skip_until[ds] = time.time() + cooldown
+        time.sleep(interval)
 
 
 if __name__ == "__main__":
-    run_booking(sys.argv[1] if len(sys.argv) > 1 else None)
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
+    if arg == "monitor":
+        try:
+            monitor_and_book()
+        except KeyboardInterrupt:
+            print("\n모니터링 종료 (Ctrl+C)")
+    else:
+        run_booking(arg)
