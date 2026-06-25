@@ -1264,11 +1264,6 @@ def monitor_and_book():
             continue
 
         print(f"\n🎯 가용 감지: {candidates}")
-        try:
-            notifier.notify(available_dates=candidates)
-        except Exception:
-            pass
-
         for ds in candidates:
             y, m, d = map(int, ds.split("-"))
             print(f"\n--- 예약 시도: {ds} ---")
