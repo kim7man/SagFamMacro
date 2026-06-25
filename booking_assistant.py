@@ -43,6 +43,7 @@ from selenium.common.exceptions import (
 import config
 import api_monitor      # 가용 날짜 확인용
 import monitor          # create_driver, accept_cookies, _click, SEL_NEXT 재사용
+import notifier         # 텔레그램 알림(빈자리/결제완료)
 
 MONTH_NAMES = monitor.MONTH_NAMES
 
@@ -1200,6 +1201,8 @@ def run_booking(arg=None):
         status = _do_booking(driver, y, m, d)
         print(f"\n결과: {status} (소요 {time.time()-t0:.1f}초)")
         if status in ("PAID", "AT_PAYMENT"):
+            if status == "PAID":
+                notifier.notify_payment_done(f"{y}-{m}-{d}", "카드 자동 제출 완료 (3DS 필요 시 직접 인증)")
             _wait_human_then_quit(driver)
         else:
             print("   3석 미확보/오류로 결제까지 진행하지 않았습니다.")
@@ -1229,6 +1232,7 @@ def monitor_and_book():
     print("=" * 60)
 
     skip_until = {}   # 날짜 -> 이 시각까지 재시도 보류(좌석 미확보 등)
+    notified = set()  # 빈자리 알림 보낸 날짜(사라지면 해제 → 재등장 시 재알림)
     count = 0
     while True:
         count += 1
@@ -1239,8 +1243,15 @@ def monitor_and_book():
             time.sleep(cooldown)
             continue
 
+        # [텔레그램 1] 빈자리 확인 직후 — 새로 가용해진 날짜만 알림(중복 방지)
+        avail = available or []
+        new_avail = [d for d in avail if d not in notified]
+        if new_avail:
+            notifier.notify_vacancy(new_avail)
+        notified = set(avail)
+
         now = time.time()
-        candidates = [d for d in (available or []) if now >= skip_until.get(d, 0)]
+        candidates = [d for d in avail if now >= skip_until.get(d, 0)]
         if not candidates:
             tag = f"가용 {available}" if available else "매진"
             print(f"[{time.strftime('%H:%M:%S')}] #{count} {tag}        ", end="\r")
@@ -1260,6 +1271,9 @@ def monitor_and_book():
 
             if status in ("PAID", "AT_PAYMENT"):
                 print(f"\n✅ {ds}: {need}석 확보 → 결제 단계 도달({status}). 모니터링 종료.")
+                if status == "PAID":
+                    # [텔레그램 2] 결제 완료 후
+                    notifier.notify_payment_done(ds, "카드 자동 제출 완료 (3DS 필요 시 직접 인증)")
                 _wait_human_then_quit(driver)
                 return
             # 미확보/실패 → 닫고 잠시 이 날짜는 보류 후 계속 모니터링

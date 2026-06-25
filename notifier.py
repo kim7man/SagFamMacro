@@ -40,6 +40,34 @@ def notify(available_dates: list[str]):
         _open_booking_page(available_dates)
 
 
+def notify_vacancy(available_dates: list[str]):
+    """[1] 빈자리 확인 직후 알림 (텔레그램 + 소리).
+    통합 모니터링용 — 자동화가 직접 브라우저를 열므로 여기선 브라우저를 열지 않는다."""
+    date_str = ", ".join(available_dates)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    full_message = (
+        f"[{ts}] 🎉 사그라다 파밀리아 빈자리 감지!\n"
+        f"가용 날짜: {date_str}\n"
+        f"자동 예약을 시작합니다.\n"
+        f"{config.TARGET_URL}"
+    )
+    print("\n" + "=" * 60 + f"\n{full_message}\n" + "=" * 60 + "\n")
+    _play_sound()
+    return _send_telegram(full_message)
+
+
+def notify_payment_done(date_str: str = "", detail: str = "") -> bool:
+    """[2] 결제 완료 후 알림 (텔레그램 + 소리)."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    head = f"💳 결제 완료!" + (f" ({date_str})" if date_str else "")
+    full_message = f"[{ts}] {head}"
+    if detail:
+        full_message += f"\n{detail}"
+    print("\n" + "=" * 60 + f"\n{full_message}\n" + "=" * 60 + "\n")
+    _play_sound()
+    return _send_telegram(full_message)
+
+
 def _open_booking_page(available_dates: list[str]):
     """가용 발견 시 예매 페이지를 기본 브라우저로 연다 (사람이 바로 결제)."""
     url = config.TARGET_URL
